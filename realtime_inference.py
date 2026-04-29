@@ -1,8 +1,8 @@
-import pickle, threading, numpy as np
+import pickle, threading, numpy as np, json, os
 from datetime import datetime
 from collections import defaultdict
 from scapy.all import AsyncSniffer, IP, TCP, UDP
-import os, tensorflow as tf
+import tensorflow as tf
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 
@@ -10,7 +10,7 @@ with open("models/scaler.pkl","rb") as f:
     scaler = pickle.load(f)
 print(f"[OK] Scaler — {scaler.n_features_in_} features")
 model = tf.keras.models.load_model("models/model.h5")
-print("[OK] Model loaded\n")
+print("[OK] Model loaded")
 
 flow_table = defaultdict(lambda:{
     'proto':0,'sizes':[],'src_port':0,'dst_port':0,
@@ -18,22 +18,49 @@ flow_table = defaultdict(lambda:{
 })
 flow_lock = threading.Lock()
 
+def get_monitored_ips():
+    """Read IoT device IPs from devices.json"""
+    try:
+        if not os.path.exists("devices.json"):
+            return []
+        with open("devices.json","r") as f:
+            devices = json.load(f).get("devices",[])
+        return [d["ip"] for d in devices if d.get("ip")]
+    except:
+        return []
+
 def predict(flow):
     sizes = flow['sizes']
     if len(sizes) < 2: return
     iat = (flow['last_time'] - flow['start_time']) / max(len(sizes)-1,1)
-    X = np.array([[float(flow['proto']),float(np.mean(sizes)),
-                   float(flow['src_port']),float(flow['dst_port']),
-                   float(flow['flags']),float(iat)]],dtype=np.float32)
+    X = np.array([[
+        float(flow['proto']),
+        float(np.mean(sizes)),
+        float(flow['src_port']),
+        float(flow['dst_port']),
+        float(flow['flags']),
+        float(iat)
+    ]],dtype=np.float32)
     X = np.nan_to_num(X)
-    prob  = float(model.predict(scaler.transform(X),verbose=0)[0][0])
-    label = "ATTACK" if prob > 0.5 else "NORMAL"
-    tag   = "[!!ATTACK!!]" if label=="ATTACK" else "[  NORMAL  ]"
-    ts    = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"{tag} {ts} | IP: {flow['src_ip']} | pkts: {len(sizes)} | conf: {round(prob,4)}")
+    prob   = float(model.predict(scaler.transform(X),verbose=0)[0][0])
+    label  = "ATTACK" if prob > 0.5 else "NORMAL"
+    tag    = "[!!ATTACK!!]" if label=="ATTACK" else "[  NORMAL  ]"
+    ts     = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    src_ip = flow['src_ip']
+
+    # Check if this is a registered IoT device
+    monitored = get_monitored_ips()
+    device_tag = " [IOT DEVICE]" if src_ip in monitored else ""
+
+    print(f"{tag} {ts} | IP: {src_ip}{device_tag} | pkts: {len(sizes)} | conf: {round(prob,4)}")
     os.makedirs("logs",exist_ok=True)
     with open("logs/detections.csv","a") as f:
-        f.write(f"{ts},{flow['src_ip']},{label},{round(prob,4)}\n")
+        f.write(f"{ts},{src_ip},{label},{round(prob,4)}\n")
+
+    # Also write to device-specific log if it's a registered IoT device
+    if src_ip in monitored and label == "ATTACK":
+        with open("logs/device_alerts.csv","a") as f:
+            f.write(f"{ts},{src_ip},{label},{round(prob,4)}\n")
 
 def handle_packet(pkt):
     if IP not in pkt: return
@@ -65,6 +92,15 @@ if __name__=="__main__":
     os.makedirs("logs",exist_ok=True)
     with open("logs/detections.csv","w") as f:
         f.write("timestamp,src_ip,result,confidence\n")
+    with open("logs/device_alerts.csv","w") as f:
+        f.write("timestamp,src_ip,result,confidence\n")
+
+    monitored = get_monitored_ips()
+    if monitored:
+        print(f"[INFO] Registered IoT devices: {monitored}")
+    else:
+        print("[INFO] No IoT devices registered yet — monitoring ALL traffic")
+
     threading.Thread(target=checker,daemon=True).start()
     try:
         print("[INFO] Sniffer running — press Ctrl+C to stop\n")

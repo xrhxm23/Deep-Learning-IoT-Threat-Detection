@@ -1,0 +1,13 @@
+{
+  "devices": [
+    {
+      "id": 1,
+      "name": "Smart Camera ",
+      "ip": "192.168.0.112",
+      "type": "Smart Camera",
+      "location": "Garage",
+      "status": "Monitoring",
+      "added": "2026-04-29 00:19:06"
+    }
+  ]
+}
